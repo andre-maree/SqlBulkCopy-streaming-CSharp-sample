@@ -1,6 +1,6 @@
 # SqlBulkCopy-streaming-sample
 Sync 2 sql tables using SqlBulkCopy data streaming:
-- this sample code sets up 2 tables
+- this sample code sets up 2 tables, only run this method in the 1st run, then uncomment it
 - populates the source table with data
 - opens a DataReader
 - sets EnableStreaming = true
