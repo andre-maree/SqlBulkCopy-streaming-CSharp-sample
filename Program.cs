@@ -3,7 +3,7 @@ using System.Data.SqlClient;
 
 class Program
 {
-    static async Task Main(string[] args)
+    static async Task Main()
     {
         string tableName = "Customers";
         string soutceConnectionString = "Integrated Security=SSPI;Persist Security Info=False;User ID=admin;Initial Catalog=MyDB;Data Source=.";
@@ -13,72 +13,65 @@ class Program
         // include this line to set up the tables on the 1st run of this code
         await CreateTablesAndPopulateSource(tableName, soutceConnectionString, targetConnectionString);
 
-        await SyncTables(tableName,
-                    soutceConnectionString,
-                    targetConnectionString
-                    );
+        await SyncTables(tableName, soutceConnectionString, targetConnectionString);
     }
 
     static async Task SyncTables(string tableName, string sourceConnection, string targetConnection)
     {
         int timeout = 999;
 
-        // Open a sourceConnection to the AdventureWorks database.
-        using (SqlConnection sourceCon = new SqlConnection(sourceConnection))
+        // Open a sourceConnection to the MyDB database.
+        using SqlConnection sourceCon = new(sourceConnection);
+
+        await sourceCon.OpenAsync();
+
+        SqlDataReader reader;
+
+        using (SqlCommand cmd = new($"SELECT * FROM {tableName}", sourceCon))
         {
-            await sourceCon.OpenAsync();
+            reader = await cmd.ExecuteReaderAsync();
+        }
 
-            SqlDataReader reader;
+        using SqlConnection destinationConnection = new(targetConnection);
 
-            using (SqlCommand cmd = new SqlCommand($"SELECT * FROM {tableName}", sourceCon))
-            {
-                reader = await cmd.ExecuteReaderAsync();
-            }
+        // check for a possible config issue, source and target should not be the same table
+        if (sourceCon.DataSource.Equals(destinationConnection.DataSource, StringComparison.OrdinalIgnoreCase)
+            && sourceCon.Database.Equals(destinationConnection.Database, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("The source and destination tables is the same table on the same sql instance.");
+        }
 
-            using (SqlConnection destinationConnection = new SqlConnection(targetConnection))
-            {
-                // check for a possible config issue, source and target should not be the same table
-                if (sourceCon.DataSource.Equals(destinationConnection.DataSource, StringComparison.OrdinalIgnoreCase)
-                    && sourceCon.Database.Equals(destinationConnection.Database, StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidOperationException("The source and destination tables is the same table on the same sql instance.");
-                }
+        await destinationConnection.OpenAsync();
 
-                await destinationConnection.OpenAsync();
+        using SqlTransaction transaction = destinationConnection.BeginTransaction();
 
-                using (SqlTransaction transaction = destinationConnection.BeginTransaction())
-                {
-                    using (SqlCommand cmd = new SqlCommand($"truncate table {tableName}", destinationConnection, transaction))
-                    {
-                        cmd.CommandTimeout = timeout;
-                        await cmd.ExecuteNonQueryAsync();
-                    }
+        using (SqlCommand cmd = new($"truncate table {tableName}", destinationConnection, transaction))
+        {
+            cmd.CommandTimeout = timeout;
+            await cmd.ExecuteNonQueryAsync();
+        }
 
-                    using (SqlBulkCopy bulkCopy = new SqlBulkCopy(destinationConnection, SqlBulkCopyOptions.KeepIdentity, transaction))
-                    {
-                        bulkCopy.EnableStreaming = true;
-                        bulkCopy.DestinationTableName = tableName;
-                        bulkCopy.BulkCopyTimeout = timeout;
-                        
-                        try
-                        {
-                            // Write from the source to the destination.
-                            await bulkCopy.WriteToServerAsync(reader);
-                            await transaction.CommitAsync();
-                        }
-                        catch (Exception ex)
-                        {
-                            transaction.Rollback();
-                        }
-                        finally
-                        {
-                            // Close the SqlDataReader. The SqlBulkCopy
-                            // object is automatically closed at the end of the using block.
-                            await reader.CloseAsync();
-                        }
-                    }
-                }
-            }
+        using SqlBulkCopy bulkCopy = new(destinationConnection, SqlBulkCopyOptions.KeepIdentity, transaction);
+
+        bulkCopy.EnableStreaming = true;
+        bulkCopy.DestinationTableName = tableName;
+        bulkCopy.BulkCopyTimeout = timeout;
+
+        try
+        {
+            // Write from the source to the destination.
+            await bulkCopy.WriteToServerAsync(reader);
+            await transaction.CommitAsync();
+        }
+        catch (Exception)
+        {
+            transaction.Rollback();
+        }
+        finally
+        {
+            // Close the SqlDataReader
+            await reader.CloseAsync();
+            await sourceCon.CloseAsync();
         }
     }
 
@@ -96,7 +89,7 @@ class Program
                                   [EmailAddress] [nvarchar](255) NULL
                                 )";
 
-        using (SqlConnection sourceCon = new SqlConnection(soutceConnectionString))
+        using (SqlConnection sourceCon = new(soutceConnectionString))
         {
             var command = new SqlCommand(cmdText, sourceCon);
 
@@ -105,9 +98,10 @@ class Program
             await command.ExecuteNonQueryAsync();
 
             command.CommandText = $"SELECT * FROM [{tableName}]";
-            SqlDataAdapter adapter = new SqlDataAdapter(command);
+            SqlDataAdapter adapter = new(command);
 
-            DataTable dt = new DataTable();
+            DataTable dt = new();
+
             await Task.Run(() => adapter.Fill(dt));
 
             for (int i = 0; i < 100000; i++)
@@ -115,21 +109,24 @@ class Program
                 dt.Rows.Add(new object[] { Guid.NewGuid().ToString(), "f", "l", "s", "c", "st", 123, "asd" });
             }
 
-            using (var copy = new SqlBulkCopy(sourceCon))
-            {
-                copy.DestinationTableName = tableName;
+            using var copy = new SqlBulkCopy(sourceCon);
 
-                await copy.WriteToServerAsync(dt);
-            }
+            copy.DestinationTableName = tableName;
+
+            await copy.WriteToServerAsync(dt);
+
+            await sourceCon.CloseAsync();
         }
 
-        using (SqlConnection targetConnection = new SqlConnection(targetConnectionString))
+        using (SqlConnection targetConnection = new(targetConnectionString))
         {
             var command = new SqlCommand(cmdText, targetConnection);
 
-            targetConnection.Open();
+            await targetConnection.OpenAsync();
 
             await command.ExecuteNonQueryAsync();
+
+            await targetConnection.CloseAsync();
         }
     }
 }
